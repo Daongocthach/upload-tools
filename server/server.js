@@ -1,7 +1,9 @@
 import "dotenv/config";
-import { createClient } from "@supabase/supabase-js";
 import cors from "cors";
 import express from "express";
+import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
+import { getDatabase } from "firebase-admin/database";
+import { getStorage } from "firebase-admin/storage";
 import fs from "fs";
 import multer from "multer";
 import path from "path";
@@ -12,10 +14,13 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const dataDir = path.join(rootDir, "data");
 const stateFile = path.join(dataDir, "state.json");
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || "shared-files";
-const storageFolder = process.env.SUPABASE_STORAGE_FOLDER || "uploads";
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+const firebaseDatabaseUrl = process.env.FIREBASE_DATABASE_URL;
+const firebaseStorageBucket = process.env.FIREBASE_STORAGE_BUCKET;
+const firebaseTextPath = process.env.FIREBASE_TEXT_PATH || "shared/text";
+const storageFolder = process.env.FIREBASE_STORAGE_FOLDER || "uploads";
 
 fs.mkdirSync(dataDir, { recursive: true });
 
@@ -23,35 +28,78 @@ if (!fs.existsSync(stateFile)) {
   fs.writeFileSync(stateFile, JSON.stringify({ text: "" }, null, 2));
 }
 
-const supabase =
-  supabaseUrl && supabaseServiceRoleKey
-    ? createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: {
-          persistSession: false,
-          autoRefreshToken: false
-        }
-      })
-    : null;
+function getFirebaseOptions() {
+  if (!firebaseStorageBucket && !firebaseDatabaseUrl) {
+    return null;
+  }
 
-function readState() {
+  if (firebaseProjectId && firebaseClientEmail && firebasePrivateKey) {
+    return {
+      credential: cert({
+        projectId: firebaseProjectId,
+        clientEmail: firebaseClientEmail,
+        privateKey: firebasePrivateKey
+      }),
+      storageBucket: firebaseStorageBucket,
+      databaseURL: firebaseDatabaseUrl
+    };
+  }
+
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    return {
+      credential: applicationDefault(),
+      storageBucket: firebaseStorageBucket,
+      databaseURL: firebaseDatabaseUrl
+    };
+  }
+
+  return null;
+}
+
+const firebaseOptions = getFirebaseOptions();
+const firebaseApp = firebaseOptions ? getApps()[0] || initializeApp(firebaseOptions) : null;
+const database = firebaseApp && firebaseDatabaseUrl ? getDatabase(firebaseApp) : null;
+const storage = firebaseApp ? getStorage(firebaseApp) : null;
+
+function readStateFile() {
   const raw = fs.readFileSync(stateFile, "utf8");
   return JSON.parse(raw);
 }
 
-function writeState(nextState) {
+function writeStateFile(nextState) {
   fs.writeFileSync(stateFile, JSON.stringify(nextState, null, 2));
 }
 
-function requireSupabase() {
-  if (!supabase) {
+async function readSharedText() {
+  if (!database) {
+    const state = readStateFile();
+    return state.text ?? "";
+  }
+
+  const snapshot = await database.ref(firebaseTextPath).get();
+  return typeof snapshot.val() === "string" ? snapshot.val() : "";
+}
+
+async function writeSharedText(nextText) {
+  if (!database) {
+    writeStateFile({ text: nextText });
+    return nextText;
+  }
+
+  await database.ref(firebaseTextPath).set(nextText);
+  return nextText;
+}
+
+function requireStorage() {
+  if (!storage) {
     const error = new Error(
-      "Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+      "Firebase Storage is not configured. Set FIREBASE_STORAGE_BUCKET and Firebase service account credentials."
     );
     error.statusCode = 500;
     throw error;
   }
 
-  return supabase;
+  return storage.bucket();
 }
 
 function sanitizeFileName(fileName) {
@@ -64,35 +112,34 @@ function buildStoragePath(fileName) {
 }
 
 async function getFiles() {
-  const client = requireSupabase();
-  const { data, error } = await client.storage.from(supabaseBucket).list(storageFolder, {
-    limit: 100,
-    offset: 0,
-    sortBy: { column: "updated_at", order: "desc" }
+  const bucket = requireStorage();
+  const [files] = await bucket.getFiles({
+    prefix: `${storageFolder}/`,
+    maxResults: 100
   });
 
-  if (error) {
-    throw error;
-  }
+  const uploadFiles = files.filter((file) => file.name !== `${storageFolder}/`);
+  const fileDetails = await Promise.all(
+    uploadFiles.map(async (file) => {
+      const [metadata] = await file.getMetadata();
+      const [downloadUrl] = await file.getSignedUrl({
+        action: "read",
+        expires: Date.now() + 60 * 60 * 1000
+      });
 
-  const files = (data || []).filter((item) => item.id && item.name);
-  const paths = files.map((file) => `${storageFolder}/${file.name}`);
-  const signedUrls =
-    paths.length > 0
-      ? await client.storage.from(supabaseBucket).createSignedUrls(paths, 60 * 60)
-      : { data: [], error: null };
+      return {
+        name: path.basename(file.name).replace(/^\d+-/, ""),
+        path: file.name,
+        size: Number(metadata.size || 0),
+        updatedAt: metadata.updated || metadata.timeCreated || new Date().toISOString(),
+        downloadUrl
+      };
+    })
+  );
 
-  if (signedUrls.error) {
-    throw signedUrls.error;
-  }
-
-  return files.map((file, index) => ({
-    name: file.name.replace(/^\d+-/, ""),
-    path: `${storageFolder}/${file.name}`,
-    size: file.metadata?.size ?? 0,
-    updatedAt: file.updated_at || file.created_at || new Date().toISOString(),
-    downloadUrl: signedUrls.data?.[index]?.signedUrl || ""
-  }));
+  return fileDetails.sort((left, right) => {
+    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  });
 }
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -103,13 +150,13 @@ app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/state", async (_req, res) => {
   try {
-    const state = readState();
-    const files = supabase ? await getFiles() : [];
+    const text = await readSharedText();
+    const files = storage ? await getFiles() : [];
 
     res.json({
-      text: state.text ?? "",
+      text,
       files,
-      storageConfigured: Boolean(supabase)
+      storageConfigured: Boolean(storage)
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -118,15 +165,21 @@ app.get("/api/state", async (_req, res) => {
   }
 });
 
-app.put("/api/text", (req, res) => {
-  const nextText = typeof req.body?.text === "string" ? req.body.text : "";
-  writeState({ text: nextText });
-  res.json({ text: nextText });
+app.put("/api/text", async (req, res) => {
+  try {
+    const nextText = typeof req.body?.text === "string" ? req.body.text : "";
+    const text = await writeSharedText(nextText);
+    res.json({ text });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      message: error.message || "Cannot save text"
+    });
+  }
 });
 
 app.post("/api/files", upload.single("file"), async (req, res) => {
   try {
-    const client = requireSupabase();
+    const bucket = requireStorage();
     const file = req.file;
 
     if (!file) {
@@ -134,15 +187,16 @@ app.post("/api/files", upload.single("file"), async (req, res) => {
     }
 
     const storagePath = buildStoragePath(file.originalname);
-    const { error } = await client.storage.from(supabaseBucket).upload(storagePath, file.buffer, {
-      contentType: file.mimetype,
-      upsert: false,
-      cacheControl: "3600"
+    await bucket.file(storagePath).save(file.buffer, {
+      resumable: false,
+      metadata: {
+        contentType: file.mimetype,
+        cacheControl: "public, max-age=3600"
+      },
+      preconditionOpts: {
+        ifGenerationMatch: 0
+      }
     });
-
-    if (error) {
-      throw error;
-    }
 
     return res.status(201).json({ ok: true });
   } catch (error) {
@@ -154,17 +208,14 @@ app.post("/api/files", upload.single("file"), async (req, res) => {
 
 app.delete("/api/files/:path(*)", async (req, res) => {
   try {
-    const client = requireSupabase();
+    const bucket = requireStorage();
     const targetPath = req.params.path;
 
     if (!targetPath) {
       return res.status(400).json({ message: "Missing file path" });
     }
 
-    const { error } = await client.storage.from(supabaseBucket).remove([targetPath]);
-    if (error) {
-      throw error;
-    }
+    await bucket.file(targetPath).delete();
 
     return res.json({ ok: true });
   } catch (error) {

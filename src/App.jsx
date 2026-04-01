@@ -72,7 +72,7 @@ export default function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!storageConfigured) {
-      setMessage("Supabase Storage chưa được cấu hình.");
+      setMessage("Firebase Storage chưa được cấu hình.");
       event.target.value = "";
       return;
     }
@@ -165,7 +165,7 @@ export default function App() {
             <div>
               <h2>Files</h2>
               <p>
-                Upload a file to Supabase Storage, then manage it from the shared list.
+                Upload a file to Firebase Storage, then manage it from the shared list.
               </p>
             </div>
             <label className={`upload-button${uploading ? " disabled" : ""}`}>
@@ -181,7 +181,7 @@ export default function App() {
 
           {!storageConfigured ? (
             <div className="empty-state">
-              Supabase Storage chưa được cấu hình. Thêm biến môi trường rồi chạy lại server.
+              Firebase Storage chưa được cấu hình. Thêm biến môi trường rồi chạy lại server.
             </div>
           ) : null}
 
