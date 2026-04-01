@@ -1,6 +1,6 @@
 # Upload Tools
 
-React + Express app for:
+React + Vite app for:
 
 - showing a shared file list
 - uploading, downloading, and deleting files with Firebase Storage
@@ -14,31 +14,41 @@ cp .env.example .env
 npm run dev
 ```
 
-Frontend runs on `http://localhost:5173`.
-Backend runs on `http://localhost:3001`.
-
+Local app runs on `http://localhost:5173`.
 Shared text is stored in Firebase Realtime Database.
-Uploaded files are stored in your Firebase Storage bucket.
+Uploaded files are stored in Firebase Storage.
 
 ## Firebase setup
 
 1. Create or use an existing Firebase project with Cloud Storage and Realtime Database enabled.
-2. Copy `.env.example` to `.env`.
-3. Fill in either the service-account env vars:
+2. In Firebase Console, open `Project settings` > `General` > `Your apps`, and copy the Web app config.
+3. Copy `.env.example` to `.env`.
+4. Fill in:
 
-- `FIREBASE_PROJECT_ID`
-- `FIREBASE_CLIENT_EMAIL`
-- `FIREBASE_PRIVATE_KEY`
-- `FIREBASE_DATABASE_URL`
-- `FIREBASE_TEXT_PATH`
-- `FIREBASE_STORAGE_BUCKET`
-- `FIREBASE_STORAGE_FOLDER`
+- `VITE_FIREBASE_API_KEY`
+- `VITE_FIREBASE_AUTH_DOMAIN`
+- `VITE_FIREBASE_DATABASE_URL`
+- `VITE_FIREBASE_PROJECT_ID`
+- `VITE_FIREBASE_STORAGE_BUCKET`
+- `VITE_FIREBASE_MESSAGING_SENDER_ID`
+- `VITE_FIREBASE_APP_ID`
+- `VITE_FIREBASE_TEXT_PATH`
+- `VITE_FIREBASE_STORAGE_FOLDER`
 
-Or set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account JSON file path and still provide:
+Because this app now uses Firebase Client SDK directly in the browser, your Firebase rules must explicitly allow the behavior you want. The permissive storage rule you pasted earlier will work for testing, but do not keep it for production.
 
-- `FIREBASE_DATABASE_URL`
-- `FIREBASE_TEXT_PATH`
-- `FIREBASE_STORAGE_BUCKET`
-- `FIREBASE_STORAGE_FOLDER`
+## GitHub Pages
 
-The server uses Firebase Admin SDK, so shared text is stored in Realtime Database and upload, list, signed download URL, and delete all run through your backend.
+This repo now includes `.github/workflows/deploy.yml` to deploy `dist/` to GitHub Pages on every push to `main`.
+
+Set these GitHub repository secrets before pushing:
+
+- `VITE_FIREBASE_API_KEY`
+- `VITE_FIREBASE_AUTH_DOMAIN`
+- `VITE_FIREBASE_DATABASE_URL`
+- `VITE_FIREBASE_PROJECT_ID`
+- `VITE_FIREBASE_STORAGE_BUCKET`
+- `VITE_FIREBASE_MESSAGING_SENDER_ID`
+- `VITE_FIREBASE_APP_ID`
+- `VITE_FIREBASE_TEXT_PATH`
+- `VITE_FIREBASE_STORAGE_FOLDER`

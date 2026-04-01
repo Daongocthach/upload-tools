@@ -1,9 +1,25 @@
 import { useEffect, useState } from "react";
+import { get, ref as databaseRef, set } from "firebase/database";
+import {
+  deleteObject,
+  getDownloadURL,
+  getMetadata,
+  listAll,
+  ref as storageRef,
+  uploadBytes
+} from "firebase/storage";
+import { database, isFirebaseConfigured, storage } from "./firebase";
 
 const defaultState = {
   text: "",
   files: []
 };
+
+const textPath = import.meta.env.VITE_FIREBASE_TEXT_PATH || "shared/text";
+const storageFolder = (import.meta.env.VITE_FIREBASE_STORAGE_FOLDER || "uploads").replace(
+  /^\/+|\/+$/g,
+  ""
+);
 
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
@@ -20,19 +36,51 @@ export default function App() {
   const [savingText, setSavingText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
-  const [storageConfigured, setStorageConfigured] = useState(true);
+  const storageConfigured = isFirebaseConfigured();
+
+  async function getFiles() {
+    if (!storage) return [];
+
+    const folderRef = storageRef(storage, storageFolder);
+    const listResult = await listAll(folderRef);
+    const files = await Promise.all(
+      listResult.items.map(async (item) => {
+        const [metadata, downloadUrl] = await Promise.all([getMetadata(item), getDownloadURL(item)]);
+
+        return {
+          name: item.name.replace(/^\d+-/, ""),
+          path: item.fullPath,
+          size: Number(metadata.size || 0),
+          updatedAt: metadata.updated || metadata.timeCreated || new Date().toISOString(),
+          downloadUrl
+        };
+      })
+    );
+
+    return files.sort((left, right) => {
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+  }
+
+  async function getText() {
+    if (!database) return "";
+
+    const snapshot = await get(databaseRef(database, textPath));
+    return typeof snapshot.val() === "string" ? snapshot.val() : "";
+  }
 
   async function loadState() {
     setLoading(true);
     setMessage("");
 
     try {
-      const response = await fetch("/api/state");
-      if (!response.ok) throw new Error("Cannot load data");
-      const data = await response.json();
-      setState(data);
-      setTextDraft(data.text ?? "");
-      setStorageConfigured(Boolean(data.storageConfigured));
+      if (!storageConfigured) {
+        throw new Error("Firebase client config is missing");
+      }
+
+      const [text, files] = await Promise.all([getText(), getFiles()]);
+      setState({ text, files });
+      setTextDraft(text);
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -49,17 +97,12 @@ export default function App() {
     setMessage("");
 
     try {
-      const response = await fetch("/api/text", {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ text: textDraft })
-      });
+      if (!database) {
+        throw new Error("Realtime Database is not configured");
+      }
 
-      if (!response.ok) throw new Error("Cannot save text");
-      const data = await response.json();
-      setState((current) => ({ ...current, text: data.text }));
+      await set(databaseRef(database, textPath), textDraft);
+      setState((current) => ({ ...current, text: textDraft }));
       setMessage("Text saved");
     } catch (error) {
       setMessage(error.message);
@@ -72,7 +115,7 @@ export default function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!storageConfigured) {
-      setMessage("Firebase Storage chưa được cấu hình.");
+      setMessage("Firebase client config chưa được cấu hình.");
       event.target.value = "";
       return;
     }
@@ -81,18 +124,15 @@ export default function App() {
     setMessage("");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch("/api/files", {
-        method: "POST",
-        body: formData
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || "Cannot upload file");
+      if (!storage) {
+        throw new Error("Storage is not configured");
       }
+
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const fileRef = storageRef(storage, `${storageFolder}/${Date.now()}-${safeName}`);
+      await uploadBytes(fileRef, file, {
+        contentType: file.type || "application/octet-stream"
+      });
 
       await loadState();
       setMessage("File uploaded");
@@ -108,14 +148,11 @@ export default function App() {
     setMessage("");
 
     try {
-      const response = await fetch(`/api/files/${encodeURIComponent(filePath)}`, {
-        method: "DELETE"
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || "Cannot delete file");
+      if (!storage) {
+        throw new Error("Storage is not configured");
       }
+
+      await deleteObject(storageRef(storage, filePath));
 
       await loadState();
       setMessage("File deleted");
@@ -130,7 +167,7 @@ export default function App() {
         <p className="eyebrow">Shared Upload Workspace</p>
         <h1>Files and text persist for every reload.</h1>
         <p className="hero-copy">
-          Upload files, download or delete them, and keep a shared text note saved on the server.
+          Upload files, download or delete them, and keep a shared text note saved directly in Firebase.
         </p>
       </section>
 
@@ -181,7 +218,7 @@ export default function App() {
 
           {!storageConfigured ? (
             <div className="empty-state">
-              Firebase Storage chưa được cấu hình. Thêm biến môi trường rồi chạy lại server.
+              Firebase client config chưa được cấu hình. Thêm `VITE_FIREBASE_*` rồi build lại app.
             </div>
           ) : null}
 
